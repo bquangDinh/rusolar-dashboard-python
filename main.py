@@ -1,22 +1,80 @@
-from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget, QHBoxLayout, QSizePolicy
+from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget, QHBoxLayout, QSizePolicy, QStackedLayout
 from PySide6.QtCore import QThread, Signal, QPointF, Qt, QTimer, QRect
-from PySide6.QtGui import QPainter, QPen, QColor
+from PySide6.QtGui import QPainter, QPen, QColor, QGuiApplication
+
 import math, sys
 import sys
 import time
+
 import can # python-can library for CAN bus communication
-import struct
+import struct # for unpacking binary data
+
+from gpiozero import Button # for button handling
+from enum import Enum
+
+import setproctitle
+
+setproctitle.setproctitle("rusolar-dashboard")
+
+print("RUSolar Dashboard started...")
+
+class ButtonType(Enum):
+    SWITCH_PAGE = 1
+    TOGGLE_LOGGER = 2
+    EXIT_FULLSCREEN = 3
 
 # Global CAN bus setup
 bus = can.interface.Bus(channel='can0', interface='socketcan')
 
-class CANWorker(QThread):
-    new_message = Signal(object)
+# Button setup
+switching_page_button = Button(2, pull_up=True, bounce_time=0.05)  # GPIO pin 17 for switching pages
+
+class ButtonWatcher(QThread):
+    new_message = Signal(int)
+    finished = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._running = True
+        self.switching_page_button = switching_page_button
+        self.switching_page_button.when_pressed = self.on_switching_button_press
 
     def run(self):
-        while True:
+        while self._running:
+            time.sleep(0.1)
+        
+        print("ButtonWatcher stopped")
+
+        self.finished.emit()
+
+    def stop(self):
+        self._running = False
+        self.switching_page_button.close()
+
+    def on_switching_button_press(self):
+        self.new_message.emit(ButtonType.SWITCH_PAGE.value)
+
+class CANWorker(QThread):
+    new_message = Signal(object)
+    finished = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._running = True
+
+    def run(self):
+        while self._running:
             msg = self.read_can_message()
             self.new_message.emit(msg)
+        
+        bus.shutdown()
+        
+        print("CANWorker stopped")
+
+        self.finished.emit()
+    
+    def stop(self):
+        self._running = False
 
     def read_can_message(self):
         msg = bus.recv()        
@@ -183,10 +241,11 @@ class SOCCircularMeter(QWidget):
 
         painter.drawText(text_rect, f"{self.value:.1f}%")
 
-class MainWindow(QWidget):
-    def __init__(self):
+class MainDashboardWindow(QWidget):
+    def __init__(self, width=800, height=600):
         super().__init__()
-        self.setWindowTitle("CAN + Qt GUI")
+        self.setWindowTitle("Main Dashboard")
+        self.setFixedSize(width, height)  # Set to full screen size
 
         # Add a Vbox layout
         self.layout = QVBoxLayout()
@@ -221,11 +280,6 @@ class MainWindow(QWidget):
 
         self.layout.addLayout(hbox2)
 
-        # Listen for CAN messages
-        self.worker = CANWorker()
-        self.worker.new_message.connect(self.handle_can_message)
-        self.worker.start()
-
     def handle_can_message(self, msg):
         # Extract ID
         id = msg.arbitration_id
@@ -247,12 +301,146 @@ class MainWindow(QWidget):
             elif sensor_id == 0x01:
                 self.trunk_temp.update_value(value)
 
+class CANLoggerWindow(QWidget):
+    def __init__(self, width=800, height=600):
+        super().__init__()
+        self.setWindowTitle("CAN Logger")
+        self.setFixedSize(width, height)  # Set to full screen size
+
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+
+        self.labels = []
+        self.limit = 20 # Maximum number of labels to display
+
+    def handle_can_message(self, msg):
+        # Handle the CAN message here
+        label = QLabel(str(msg))
+        self.layout.addWidget(label)
+        self.labels.append(label)
+
+        if len(self.labels) > self.limit:
+            old_label = self.labels.pop(0)
+            self.layout.removeWidget(old_label)
+            old_label.deleteLater()
+
+class MainWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("RUSolar Dashboard")
+
+        # Display fullscreen in the 2nd screen if available
+        screens = QGuiApplication.screens()
+
+        if not screens or len(screens) == 0:
+            raise RuntimeError("No screens available")
+
+        # Use the first screen if no second screen is available
+        if len(screens) > 1:
+            screen = screens[1]
+        else:
+            screen = screens[0]
+            
+        geometry = screen.geometry()
+
+        self.setGeometry(geometry)
+
+        self.move(geometry.topLeft())
+
+        # Get screen size
+        if screen is None:
+            raise RuntimeError("No screen found")
+        
+        size = screen.availableGeometry()
+
+        self.screen_width = size.width()
+
+        self.screen_height = size.height()
+
+        # # Pages
+        # self.main_dashboard = MainDashboardWindow(screen_width, screen_height)
+        # self.can_logger = CANLoggerWindow(screen_width, screen_height)
+
+        # # Stack
+        # self.stack = QStackedLayout()
+        # self.stack.addWidget(self.main_dashboard)
+        # self.stack.addWidget(self.can_logger)
+
+        # self.setLayout(self.stack)
+
+        # Since we only have two pages, we can use a simple flag to toggle between them
+        self.toogle_page = True
+
+        # Default to the main dashboard
+        default_page = MainDashboardWindow(self.screen_width, self.screen_height)
+
+        self.stack = QStackedLayout()
+        self.stack.addWidget(default_page)
+        self.setLayout(self.stack)
+
+        # Listen for button presses
+        self.button_watcher = ButtonWatcher()
+        self.button_watcher.new_message.connect(self.handle_button_press)
+        self.button_watcher.finished.connect(self.button_watcher.deleteLater)
+        self.button_watcher.start()
+
+        # Listen for CAN messages
+        self.worker = CANWorker()
+        self.worker.new_message.connect(self.handle_can_message)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.start()
+
+    def handle_can_message(self, msg):
+        # Pass the message to the current page
+        current_widget = self.stack.currentWidget()
+        if isinstance(current_widget, MainDashboardWindow):
+            current_widget.handle_can_message(msg)
+        elif isinstance(current_widget, CANLoggerWindow):
+            current_widget.handle_can_message(msg)
+        else:
+            raise ValueError("Unknown widget type in stack")
+
+    def handle_button_press(self, button_type):
+        if button_type == ButtonType.SWITCH_PAGE.value:
+            # Switch between the main dashboard and the CAN logger
+            current_widget = self.stack.currentWidget()
+            self.stack.removeWidget(current_widget)
+            current_widget.deleteLater()
+
+            # Toggle
+            self.toogle_page = not self.toogle_page
+
+            if self.toogle_page:
+                self.current_page = MainDashboardWindow(self.screen_width, self.screen_height)
+            else:
+                self.current_page = CANLoggerWindow(self.screen_width, self.screen_height)
+
+            self.stack.addWidget(self.current_page)
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
-            self.showNormal()  # exit fullscreen
+            self.showNormal()
+
+    def closeEvent(self, event):
+        print("Stopping thread...")
+        self.worker.stop()      # Ask worker to stop loop
+        self.worker.quit()      # Quit the thread's event loop
+        self.worker.wait()      # Block until thread is finished
+
+        self.button_watcher.stop()  # Stop the button watcher
+        self.button_watcher.quit()
+        self.button_watcher.wait()
+
+        print("Thread stopped.")
+
+        event.accept()
+
+def cleanup():
+    print("Cleanup completed.")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.aboutToQuit.connect(cleanup)  # Connect cleanup function to app exit
     main_window = MainWindow()
-    main_window.showFullScreen()
+    main_window.showFullScreen()  # Show the main window in fullscreen mode
     sys.exit(app.exec())

@@ -29,6 +29,18 @@ bus = can.interface.Bus(channel='can0', interface='socketcan')
 # Button setup
 switching_page_button = Button(2, pull_up=True, bounce_time=0.05)  # GPIO pin 17 for switching pages
 
+# Some global vars
+MAX_SPEED = 16 # in m/s
+
+# Utility functions
+# Convert speed from m/s to mph
+def ms2mph(speed):
+    return speed * 2.24
+
+# Clamp function to ensure a value is within a specified range
+def clamp(value, min_value, max_value):
+    return max(min_value, min(value, max_value))
+
 class ButtonWatcher(QThread):
     new_message = Signal(int)
     finished = Signal()
@@ -42,7 +54,7 @@ class ButtonWatcher(QThread):
     def run(self):
         while self._running:
             time.sleep(0.1)
-        
+
         print("ButtonWatcher stopped")
 
         self.finished.emit()
@@ -66,18 +78,18 @@ class CANWorker(QThread):
         while self._running:
             msg = self.read_can_message()
             self.new_message.emit(msg)
-        
+
         bus.shutdown()
-        
+
         print("CANWorker stopped")
 
         self.finished.emit()
-    
+
     def stop(self):
         self._running = False
 
     def read_can_message(self):
-        msg = bus.recv()        
+        msg = bus.recv()
         return msg
 
 class CircularMeter(QWidget):
@@ -146,6 +158,7 @@ class CircurlarMeterContainer(QWidget):
         self.setWindowTitle("Circular Meter Container")
         self.setFixedSize(600, 400)
         self.surfix = surfix
+        self.process_val_func = process_val_func;
         self.value_label = QLabel(str(process_val_func(init_value)) + " " + self.surfix)
         self.value_label.setStyleSheet("font-size: 24px; font-weight: bold;")
         self.value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -168,9 +181,9 @@ class CircurlarMeterContainer(QWidget):
 
     def update_value(self, value):
         self.circular_meter.update_value(value)
-    
+
     def update_label(self, value):
-        self.value_label.setText(str(value))
+        self.value_label.setText(str(round(self.process_val_func(value), 2)) + " " + self.surfix)
         self.value_label.update()
 
 class TempMeterContainer(QWidget):
@@ -181,7 +194,7 @@ class TempMeterContainer(QWidget):
 
         self.value_label = QLabel(str(init_value) + " °C")
         self.value_label.setStyleSheet("font-size: 24px; font-weight: bold;")
-        
+
         self.label_widget = QLabel(label)
         self.label_widget.setStyleSheet("font-size: 18px; font-weight: bold;")
 
@@ -192,6 +205,48 @@ class TempMeterContainer(QWidget):
 
     def update_value(self, value):
         self.value_label.setText(str(value) + " °C")
+
+class BPSFaultIndicator(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("BPS Fault Indicator")
+        self.setFixedSize(50, 50)
+        self.is_faulty = False
+
+    def update_fault_status(self, is_faulty):
+        self.is_faulty = is_faulty
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        if self.is_faulty:
+            painter.setBrush(QColor(255, 0, 0))  # Red for fault
+        else:
+            painter.setBrush(QColor(0, 255, 0))  # Green for normal
+
+        painter.drawEllipse(0, 0, 40, 40)  # Draw a circle
+
+class BPSFaultIndicatorContainer(QWidget):
+    def __init__(self, label):
+        super().__init__()
+        self.setWindowTitle("BPS Fault Indicator Container")
+        self.setFixedSize(200, 50)
+
+        self.label_widget = QLabel(label)
+        self.label_widget.setStyleSheet("font-size: 18px; font-weight: bold;")
+
+        self.bps_fault_indicator = BPSFaultIndicator()
+
+        layout = QHBoxLayout()
+        layout.addWidget(self.label_widget)
+        layout.addWidget(self.bps_fault_indicator)
+
+        self.setLayout(layout)
+
+    def update_fault_status(self, is_faulty):
+        self.bps_fault_indicator.update_fault_status(is_faulty)
 
 class SOCCircularMeter(QWidget):
     def __init__(self):
@@ -259,24 +314,28 @@ class MainDashboardWindow(QWidget):
         # Add two circular meters to the Hbox layout
         hbox1 = QHBoxLayout()
 
-        self.circular_meter_widget1 = CircurlarMeterContainer(SOCCircularMeter(), "SOC", "W", lambda x: x, 100)
-        self.circular_meter_widget2 = CircurlarMeterContainer(CircularMeter(), "Speed", "km/h", lambda x: x, 75)
-        
-        hbox1.addWidget(self.circular_meter_widget1)
-        hbox1.addWidget(self.circular_meter_widget2)
+        self.soc_circular_meter_widget = CircurlarMeterContainer(SOCCircularMeter(), "SOC", "W", lambda x: x, 0)
+        self.speed_circular_meter_widget = CircurlarMeterContainer(CircularMeter(), "Speed", "mph", ms2mph, 0)
+
+        hbox1.addWidget(self.soc_circular_meter_widget)
+        hbox1.addWidget(self.speed_circular_meter_widget)
 
         hbox.addLayout(hbox1)
 
         # Add a rectangular meter for temperature
         self.cabin_temp = TempMeterContainer("Cabin Temp")
-        self.cabin_temp.setMaximumWidth(300)
+        self.cabin_temp.setMaximumWidth(150)
 
         self.trunk_temp = TempMeterContainer("Trunk Temp")
-        self.trunk_temp.setMaximumWidth(300)
-
+        self.trunk_temp.setMaximumWidth(150)
+        
+        self.bps_fault_indicator = BPSFaultIndicatorContainer("BPS Fault")
+        self.bps_fault_indicator.setMaximumWidth(150)
+        
         hbox2 = QHBoxLayout()
         hbox2.addWidget(self.cabin_temp)
         hbox2.addWidget(self.trunk_temp)
+        hbox2.addWidget(self.bps_fault_indicator)
 
         self.layout.addLayout(hbox2)
 
@@ -300,6 +359,21 @@ class MainDashboardWindow(QWidget):
                 self.cabin_temp.update_value(value)
             elif sensor_id == 0x01:
                 self.trunk_temp.update_value(value)
+        elif id == 0x111:
+            # Speed data from telemetry board
+            # Extract data
+            data = msg.data
+
+            # Unpack the speed value
+            value = struct.unpack('<f', bytes(data[0:4]))[0]
+
+            # Update speed odometer
+            percentage = value * 100 / MAX_SPEED
+
+            percentage = clamp(percentage, 0, 100)
+
+            self.speed_circular_meter_widget.update_value(percentage)
+            self.speed_circular_meter_widget.update_label(value)
 
 class CANLoggerWindow(QWidget):
     def __init__(self, width=800, height=600):
@@ -332,15 +406,8 @@ class MainWindow(QWidget):
         # Display fullscreen in the 2nd screen if available
         screens = QGuiApplication.screens()
 
-        if not screens or len(screens) == 0:
-            raise RuntimeError("No screens available")
+        screen = screens[1]
 
-        # Use the first screen if no second screen is available
-        if len(screens) > 1:
-            screen = screens[1]
-        else:
-            screen = screens[0]
-            
         geometry = screen.geometry()
 
         self.setGeometry(geometry)
@@ -350,7 +417,7 @@ class MainWindow(QWidget):
         # Get screen size
         if screen is None:
             raise RuntimeError("No screen found")
-        
+
         size = screen.availableGeometry()
 
         self.screen_width = size.width()

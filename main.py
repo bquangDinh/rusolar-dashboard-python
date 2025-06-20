@@ -23,14 +23,20 @@ class ButtonType(Enum):
     TOGGLE_LOGGER = 2
     EXIT_FULLSCREEN = 3
 
+# Some global vars
+MAX_SPEED = 16 # in m/s # Maximum speed of the vehicle, used to calculate percentage for speed odometer
+MAX_SOC = 4471 # in Wh # Maximum SOC of the battery pack, used to calculate percentage for SOC circular meter
+
+ALLOWED_CAN_IDS = [0x110, 0x111, 0x102]  # IDs we expect to receive from Arduino and telemetry board and Pack SOC data from BMS
+CAN_BITRATE = 500000  # Standard CAN bitrate
+
 # Global CAN bus setup
-bus = can.interface.Bus(channel='can0', interface='socketcan')
+can_filters = [{'can_id': can_id, 'can_mask': 0x7FF} for can_id in ALLOWED_CAN_IDS]
+
+bus = can.interface.Bus(channel='can0', interface='socketcan', bitrate=CAN_BITRATE, filters=can_filters)
 
 # Button setup
 switching_page_button = Button(2, pull_up=True, bounce_time=0.05)  # GPIO pin 17 for switching pages
-
-# Some global vars
-MAX_SPEED = 16 # in m/s
 
 # Utility functions
 # Convert speed from m/s to mph
@@ -153,13 +159,12 @@ class CircularMeter(QWidget):
         painter.drawEllipse(center, 5, 5)
 
 class CircurlarMeterContainer(QWidget):
-    def __init__(self, circular_meter_widget, label, surfix, process_val_func, init_value=0):
+    def __init__(self, circular_meter_widget, label, surfix, init_value=0):
         super().__init__()
         self.setWindowTitle("Circular Meter Container")
         self.setFixedSize(600, 400)
         self.surfix = surfix
-        self.process_val_func = process_val_func;
-        self.value_label = QLabel(str(process_val_func(init_value)) + " " + self.surfix)
+        self.value_label = QLabel(str(round(init_value, 2)) + " " + self.surfix)
         self.value_label.setStyleSheet("font-size: 24px; font-weight: bold;")
         self.value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.value_label.setMaximumWidth(300)
@@ -183,7 +188,7 @@ class CircurlarMeterContainer(QWidget):
         self.circular_meter.update_value(value)
 
     def update_label(self, value):
-        self.value_label.setText(str(round(self.process_val_func(value), 2)) + " " + self.surfix)
+        self.value_label.setText(str(round(value, 2)) + " " + self.surfix)
         self.value_label.update()
 
 class TempMeterContainer(QWidget):
@@ -204,7 +209,7 @@ class TempMeterContainer(QWidget):
         self.setLayout(self.layout)
 
     def update_value(self, value):
-        self.value_label.setText(str(value) + " °C")
+        self.value_label.setText(str(round(value, 1)) + " °C")
 
 class BPSFaultIndicator(QWidget):
     def __init__(self):
@@ -292,7 +297,7 @@ class SOCCircularMeter(QWidget):
         painter.setFont(font)
 
         # Offset the text slightly to center it, only change the x position
-        text_rect = QRect(center.x() - 50, center.y() - 10, radius * 2 - 20, radius * 2 - 20)
+        text_rect = QRect(center.x() - 40, center.y() - 10, radius * 2 - 20, radius * 2 - 20)
 
         painter.drawText(text_rect, f"{self.value:.1f}%")
 
@@ -314,8 +319,8 @@ class MainDashboardWindow(QWidget):
         # Add two circular meters to the Hbox layout
         hbox1 = QHBoxLayout()
 
-        self.soc_circular_meter_widget = CircurlarMeterContainer(SOCCircularMeter(), "SOC", "W", lambda x: x, 0)
-        self.speed_circular_meter_widget = CircurlarMeterContainer(CircularMeter(), "Speed", "mph", ms2mph, 0)
+        self.soc_circular_meter_widget = CircurlarMeterContainer(SOCCircularMeter(), "SOC", "Wh", 0)
+        self.speed_circular_meter_widget = CircurlarMeterContainer(CircularMeter(), "Speed", "mph", 0)
 
         hbox1.addWidget(self.soc_circular_meter_widget)
         hbox1.addWidget(self.speed_circular_meter_widget)
@@ -371,9 +376,27 @@ class MainDashboardWindow(QWidget):
             percentage = value * 100 / MAX_SPEED
 
             percentage = clamp(percentage, 0, 100)
+            
+            # Convert value to mph
+            value = ms2mph(value)
 
             self.speed_circular_meter_widget.update_value(percentage)
             self.speed_circular_meter_widget.update_label(value)
+        elif id == 0x102:
+            # Pack SOC data from BMS
+            # Extract data
+            data = msg.data
+            
+            # Pack SOC is byte 0 from 0 to 100
+            soc = data[0]
+            
+            # Update SOC circular meter
+            percentage = soc  # Already in percentage
+            
+            val = (percentage / 100) * MAX_SOC  # Convert percentage to Wh
+            
+            self.soc_circular_meter_widget.update_value(percentage)
+            self.soc_circular_meter_widget.update_label(val)
 
 class CANLoggerWindow(QWidget):
     def __init__(self, width=800, height=600):
@@ -458,6 +481,10 @@ class MainWindow(QWidget):
         self.worker.start()
 
     def handle_can_message(self, msg):
+        # Log msg to a file
+        with open("can_log.txt", "a") as f:
+            f.write(f"{msg}\n")
+
         # Pass the message to the current page
         current_widget = self.stack.currentWidget()
         if isinstance(current_widget, MainDashboardWindow):

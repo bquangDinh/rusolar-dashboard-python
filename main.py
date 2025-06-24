@@ -27,8 +27,12 @@ class ButtonType(Enum):
 MAX_SPEED = 16 # in m/s # Maximum speed of the vehicle, used to calculate percentage for speed odometer
 MAX_SOC = 4471 # in Wh # Maximum SOC of the battery pack, used to calculate percentage for SOC circular meter
 
-ALLOWED_CAN_IDS = [0x110, 0x111, 0x102]  # IDs we expect to receive from Arduino and telemetry board and Pack SOC data from BMS
+# 0x10D - Telemetry board data
+# 0x10C - Arduino data
+# 0x100 - BMS Pack SOC data
+ALLOWED_CAN_IDS = [0x10D, 0x10C, 0x100]  # IDs we expect to receive from Arduino and telemetry board and Pack SOC data from BMS
 CAN_BITRATE = 500000  # Standard CAN bitrate
+SOC_DATA_INDEX = 6 # SOC data is in the 7 byte of the CAN message with ID 0x100
 
 # Global CAN bus setup
 can_filters = [{'can_id': can_id, 'can_mask': 0x7FF} for can_id in ALLOWED_CAN_IDS]
@@ -349,22 +353,21 @@ class MainDashboardWindow(QWidget):
         id = msg.arbitration_id
 
         # If ID is from Arduino (0x110)
-        if id == 0x110:
+        if id == 0x10C:
             # Extract data
             data = msg.data
 
-            # The first byte represents ID of the sensor (where it is located)
-            sensor_id = data[0]
+            # The first 4 bytes represent the value (float) of the first sensor
+            value1 = struct.unpack('<f', bytes(data[0:4]))[0]
 
-            # The next 4 bytes represent the value (float)
-            value = struct.unpack('<f', bytes(data[1:5]))[0]
-
+            # The next 4 bytes represent the value (float) of the second sensor
+            value2 = struct.unpack('<f', bytes(data[4:8]))[0]
+            
             # Update the corresponding circular meter or temperature meter
-            if sensor_id == 0x00:
-                self.cabin_temp.update_value(value)
-            elif sensor_id == 0x01:
-                self.trunk_temp.update_value(value)
-        elif id == 0x111:
+            self.cabin_temp.update_value(value1)
+            
+            self.trunk_temp.update_value(value2)    
+        elif id == 0x10D:
             # Speed data from telemetry board
             # Extract data
             data = msg.data
@@ -382,13 +385,13 @@ class MainDashboardWindow(QWidget):
 
             self.speed_circular_meter_widget.update_value(percentage)
             self.speed_circular_meter_widget.update_label(value)
-        elif id == 0x102:
+        elif id == 0x100:
             # Pack SOC data from BMS
             # Extract data
             data = msg.data
             
             # Pack SOC is byte 0 from 0 to 100
-            soc = data[0]
+            soc = data[SOC_DATA_INDEX]
             
             # Update SOC circular meter
             percentage = soc  # Already in percentage

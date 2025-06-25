@@ -12,6 +12,10 @@ import struct # for unpacking binary data
 from gpiozero import Button # for button handling
 from enum import Enum
 
+import subprocess # for executing vcgencmd commands
+
+import psutil # for system monitoring
+
 import setproctitle
 
 setproctitle.setproctitle("rusolar-dashboard")
@@ -33,6 +37,9 @@ MAX_SOC = 4471 # in Wh # Maximum SOC of the battery pack, used to calculate perc
 ALLOWED_CAN_IDS = [0x10D, 0x10C, 0x100]  # IDs we expect to receive from Arduino and telemetry board and Pack SOC data from BMS
 CAN_BITRATE = 500000  # Standard CAN bitrate
 SOC_DATA_INDEX = 6 # SOC data is in the 7 byte of the CAN message with ID 0x100
+RASPI5_STATUS_CAN_ID = 0x10E
+
+CAN_LOG_FILEPATH = "/home/rusolar/can_log.log"
 
 # Global CAN bus setup
 can_filters = [{'can_id': can_id, 'can_mask': 0x7FF} for can_id in ALLOWED_CAN_IDS]
@@ -50,6 +57,97 @@ def ms2mph(speed):
 # Clamp function to ensure a value is within a specified range
 def clamp(value, min_value, max_value):
     return max(min_value, min(value, max_value))
+
+def vcgencmd(command):
+    try:
+        result = subprocess.run(['vcgencmd', command], capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing vcgencmd: {e}")
+        return None
+
+def get_raspi5_temp():
+    temp_output = vcgencmd('measure_temp')
+    if temp_output:
+        try:
+            temp_str = temp_output.split('=')[1].replace("'C", "")
+            return float(temp_str)
+        except (IndexError, ValueError) as e:
+            print(f"Error parsing temperature: {e}")
+            return None
+    return None
+
+def get_raspi5_voltage():
+    voltage_output = vcgencmd('measure_volts')
+    if voltage_output:
+        try:
+            voltage_str = voltage_output.split('=')[1].replace("V", "")
+            return float(voltage_str)
+        except (IndexError, ValueError) as e:
+            print(f"Error parsing voltage: {e}")
+            return None
+    return None
+
+def get_raspi5_ram_usage():
+    mem = psutil.virtual_memory()
+    return mem.percent
+
+def get_raspi5_cpu_usage():
+    return psutil.cpu_percent(interval=1) # This will block for 1 second to get a more accurate reading
+
+def get_can_log_file_size():
+    # Use du to get the file size in bytes
+    try:
+        result = subprocess.run(['du', '-b', CAN_LOG_FILEPATH], capture_output=True, text=True, check=True)
+        size_str = result.stdout.split()[0]
+        return int(size_str)
+    except (subprocess.CalledProcessError, IndexError, ValueError) as e:
+        print(f"Error getting CAN log file size: {e}")
+        return None
+    
+def get_raspi5_status_snapshot():
+    # Get Internal temperature
+    temp_output = get_raspi5_temp()
+    
+    # Get Internal voltage
+    voltage_output = get_raspi5_voltage()
+    
+    # Get RAM usage
+    ram_usage = get_raspi5_ram_usage()
+    
+    # Get CPU usage
+    cpu_usage = get_raspi5_cpu_usage()
+    
+    # Get CAN log file size
+    can_log_file_size = get_can_log_file_size()
+    
+    print(f"Ras Pi 5 status - Temp: {temp_output}C, Voltage: {voltage_output}V, RAM: {ram_usage}%, CPU: {cpu_usage}%, CAN log size: {can_log_file_size} bytes")
+    
+    # Pack data into a 8-byte array
+    data = bytearray(8)
+    
+    # Since temperature is a float, I don't need to measure the exact value, just the integer part is enough
+    data[0] = int(temp_output) & 0xFF if data[0] is not None else 0
+    
+    # Voltage is a float ranging from 0 to 12V, I will multiply it by 10 to get one decimal precision and store it as an integer
+    data[1] = int(voltage_output * 10) & 0xFF if voltage_output is not None else 0
+    
+    # RAM usage is a percentage, so it fits in one byte
+    data[2] = int(ram_usage) & 0xFF if ram_usage is not None else 0
+    
+    # CPU usage is a percentage, so it fits in one byte
+    data[3] = int(cpu_usage) & 0xFF if cpu_usage is not None else 0
+    
+    # CAN log file size is in bytes, convert it to MB and store it as an integer in 2-byte big-endian format
+    if can_log_file_size is not None:
+        can_log_file_size_mb = can_log_file_size // (1024 * 1024)
+        data[4] = (can_log_file_size_mb >> 8) & 0xFF
+        data[5] = can_log_file_size_mb & 0xFF
+        
+    data[6] = 0
+    data[7] = 0
+    
+    return data
 
 class ButtonWatcher(QThread):
     new_message = Signal(int)
@@ -87,7 +185,13 @@ class CANWorker(QThread):
     def run(self):
         while self._running:
             msg = self.read_can_message()
+            
             self.new_message.emit(msg)
+            
+            # Get Raspberry Pi 5 status snapshot and send it to the telemetry board every second
+            raspi5_data = get_raspi5_status_snapshot()
+                        
+            self.send_can_message(RASPI5_STATUS_CAN_ID, raspi5_data)
 
         bus.shutdown()
 
@@ -100,7 +204,29 @@ class CANWorker(QThread):
 
     def read_can_message(self):
         msg = bus.recv()
+        
+        # Log the message to a file
+        # Log msg to a file
+        if msg is not None:
+            self.log_can_message(msg)
+
         return msg
+    
+    def send_can_message(self, can_id, data):
+        msg = can.Message(arbitration_id=can_id, data=data, is_extended_id=False)
+        try:
+            bus.send(msg)
+            print(f"Sent CAN message: {msg}")
+            
+            # Log the sent message to a file
+            self.log_can_message(msg)
+
+        except can.CanError as e:
+            print(f"Error sending CAN message: {e}")
+            
+    def log_can_message(self, msg):
+        with open(CAN_LOG_FILEPATH, "a") as f:
+            f.write(f"{msg}\n")
 
 class CircularMeter(QWidget):
     def __init__(self):
@@ -484,10 +610,6 @@ class MainWindow(QWidget):
         self.worker.start()
 
     def handle_can_message(self, msg):
-        # Log msg to a file
-        with open("can_log.txt", "a") as f:
-            f.write(f"{msg}\n")
-
         # Pass the message to the current page
         current_widget = self.stack.currentWidget()
         if isinstance(current_widget, MainDashboardWindow):

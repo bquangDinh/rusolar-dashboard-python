@@ -229,14 +229,19 @@ class CANWorker(QThread):
             f.write(f"{msg}\n")
 
 class CircularMeter(QWidget):
-    def __init__(self):
+    def __init__(self, threshold_colors=None):
         super().__init__()
         self.setWindowTitle("Circular Meter")
-        self.setFixedSize(300, 300)
+        self.setFixedSize(300, 250)
         self.value = 0
+        self.threshold_colors = threshold_colors if threshold_colors else [
+            (100, QColor(255, 0, 0))    # Red for 0-100%
+        ]
 
     # Update the value of the meter, the value should be between 0 and 100
     def update_value(self, value):
+        print(f"Updating CircularMeter value to {value}")
+        
         self.value = value
         self.update()
 
@@ -262,7 +267,10 @@ class CircularMeter(QWidget):
         )
 
         # Draw needle arc
-        pen.setColor(QColor(50, 200, 50))
+        for threshold, color in self.threshold_colors:
+            if self.value <= threshold:
+                pen.setColor(color)
+                break
         painter.setPen(pen)
         span = int(self.value / 100 * angle_span)
         painter.drawArc(
@@ -288,11 +296,11 @@ class CircularMeter(QWidget):
         painter.setBrush(Qt.black)
         painter.drawEllipse(center, 5, 5)
 
-class CircurlarMeterContainer(QWidget):
-    def __init__(self, circular_meter_widget, label, surfix, init_value=0):
+class CircularMeterContainer(QWidget):
+    def __init__(self, circular_meter_widget, label, surfix, threshold_colors=None, init_value=0):
         super().__init__()
         self.setWindowTitle("Circular Meter Container")
-        self.setFixedSize(600, 400)
+        self.setFixedSize(600, 350)
         self.surfix = surfix
         self.value_label = QLabel(str(round(init_value, 2)) + " " + self.surfix)
         self.value_label.setStyleSheet("font-size: 24px; font-weight: bold;")
@@ -322,10 +330,13 @@ class CircurlarMeterContainer(QWidget):
         self.value_label.update()
 
 class TempMeterContainer(QWidget):
-    def __init__(self, label, init_value=0):
+    def __init__(self, label, threshold_colors=None, init_value=0):
         super().__init__()
         self.setWindowTitle("Temperature Meter Container")
         self.setFixedSize(300, 50)
+        self.threshold_colors = threshold_colors if threshold_colors else [
+            (100, QColor(0, 0, 0)),    # Black for 0-100C
+        ]
 
         self.value_label = QLabel(str(init_value) + " °C")
         self.value_label.setStyleSheet("font-size: 24px; font-weight: bold;")
@@ -339,6 +350,11 @@ class TempMeterContainer(QWidget):
         self.setLayout(self.layout)
 
     def update_value(self, value):
+        # Set color of text based on value
+        for threshold, color in self.threshold_colors:
+            if value <= threshold:
+                self.value_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color.name()};")
+                break
         self.value_label.setText(str(round(value, 1)) + " °C")
 
 class BPSFaultIndicator(QWidget):
@@ -384,11 +400,14 @@ class BPSFaultIndicatorContainer(QWidget):
         self.bps_fault_indicator.update_fault_status(is_faulty)
 
 class SOCCircularMeter(QWidget):
-    def __init__(self):
+    def __init__(self, threshold_colors=None):
             super().__init__()
             self.setWindowTitle("Circular Meter")
-            self.setFixedSize(300, 300)
+            self.setFixedSize(300, 250)
             self.value = 0
+            self.threshold_colors = threshold_colors if threshold_colors else [
+                (100, QColor(50, 200, 50))    # Green for 0-100%
+            ]
 
     # Update the value of the meter, the value should be between 0 and 100
     def update_value(self, value):
@@ -409,7 +428,10 @@ class SOCCircularMeter(QWidget):
         # Draw the filled arc based on the value
         angle_span = 360 * self.value / 100
         start_angle = 90  # Start from the top
-        pen.setColor(QColor(50, 200, 50))
+        for threshold, color in self.threshold_colors:
+            if self.value <= threshold:
+                pen.setColor(color)
+                break
         painter.setPen(pen)
         painter.drawArc(
             center.x() - radius,
@@ -421,7 +443,11 @@ class SOCCircularMeter(QWidget):
         )
 
         # Draw the text in the center
-        painter.setPen(Qt.black)
+        # Set color of text based on value
+        for  threshold, color in self.threshold_colors:
+            if self.value <= threshold:
+                painter.setPen(QPen(color))
+                break
         font = painter.font()
         font.setPointSize(24)
         painter.setFont(font)
@@ -431,16 +457,79 @@ class SOCCircularMeter(QWidget):
 
         painter.drawText(text_rect, f"{self.value:.1f}%")
 
+class SubSystemStatusWidget(QWidget):
+    def __init__(self, label, process_status_func):
+        super().__init__()
+        self.setWindowTitle("Subsystem Status")
+        self.setFixedSize(200, 40)
+        self.process_status_func = process_status_func
+        self.label = label
+        self.status = False # Initial status is faulty
+    
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Draw text
+        text_pos = QPointF(30, 15)
+        painter.setPen(QPen(Qt.black))
+        font = painter.font()
+        font.setPointSize(14)
+        painter.setFont(font)
+        painter.drawText(text_pos, self.label)
+
+        # Draw circle
+        painter.setBrush(QColor(0, 255, 0) if self.status else QColor(255, 0, 0))
+        painter.drawEllipse(10, 2, 15, 15)
+        
+    def update_status(self, can_msg):
+        self.status = self.process_status_func(can_msg)
+        
+        # Issue a repaint
+        self.update()
+
+class SubSystemStatusesContainer(QWidget):
+    def __init__(self, subsystems):
+        super().__init__()
+        self.setWindowTitle("Subsystem Statuses Container")
+        self.setFixedSize(600, 40)
+
+        layout = QHBoxLayout()
+        for label, process_status_func in subsystems:
+            widget = SubSystemStatusWidget(label, process_status_func)
+            layout.addWidget(widget)
+
+        self.setLayout(layout)
+        
+    def update_statuses(self, can_msg):
+        for i in range(self.layout().count()):
+            widget = self.layout().itemAt(i).widget()
+            widget.update_status(can_msg)  
+            
 class MainDashboardWindow(QWidget):
     def __init__(self, width=800, height=600):
         super().__init__()
         self.setWindowTitle("Main Dashboard")
         self.setFixedSize(width, height)  # Set to full screen size
-
+        self.timeout_amount = 5 # seconds
+        self.is_timeout = True
+        self.system_calls = {}
+        
         # Add a Vbox layout
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
 
+        # Add subsystem statuses container
+        subsystems = [
+            ("BMS", lambda msg, self=self: self.is_bms_responding(msg)),
+            ("Telemetry", lambda msg, self=self: self.is_telemetry_responding(msg)),
+            ("Arduino", lambda msg, self=self: self.is_arduino_responding(msg)),
+            ("BFS Fault", lambda msg, self=self: False),
+        ]
+        self.subsystem_statuses = SubSystemStatusesContainer(subsystems)
+        self.layout.addWidget(self.subsystem_statuses)
+        self.subsystem_statuses.setMaximumHeight(50)
+        
         # Add to Vbox layout a Hbox layout
         hbox = QHBoxLayout()
 
@@ -448,9 +537,33 @@ class MainDashboardWindow(QWidget):
 
         # Add two circular meters to the Hbox layout
         hbox1 = QHBoxLayout()
+        
+        soc_threshold_colors = [
+            (20, QColor(200, 0, 0)),        # Red for 0-20%
+            (50, QColor(255, 165, 0)),      # Orange for 21-50%
+            (100, QColor(50, 200, 50))      # Green for 51-100%
+        ]
+        
+        speed_threshold_colors = [
+            (30, QColor(50, 200, 50)),      # Green for 0-30%
+            (70, QColor(255, 165, 0)),      # Orange for 31-70%
+            (100, QColor(200, 0, 0))        # Red for 71-100%
+        ]
+        
+        cabin_temp_threshold_colors = [
+            (35, QColor(0, 0, 0)),          # Black for 0-35C
+            (45, QColor(255, 165, 0)),      # Orange for 36-45C
+            (100, QColor(200, 0, 0))        # Red for 46-100C
+        ]
+        
+        trunk_temp_threshold_colors = [
+            (45, QColor(0, 0, 0)),          # Black for 0-45C
+            (60, QColor(255, 165, 0)),      # Orange for 46-60C
+            (100, QColor(200, 0, 0))        # Red for 61-100C
+        ]
 
-        self.soc_circular_meter_widget = CircurlarMeterContainer(SOCCircularMeter(), "SOC", "Wh", 0)
-        self.speed_circular_meter_widget = CircurlarMeterContainer(CircularMeter(), "Speed", "mph", 0)
+        self.soc_circular_meter_widget = CircularMeterContainer(SOCCircularMeter(soc_threshold_colors), "SOC", "Wh", soc_threshold_colors, 0)
+        self.speed_circular_meter_widget = CircularMeterContainer(CircularMeter(speed_threshold_colors), "Speed", "mph", speed_threshold_colors, 0)
 
         hbox1.addWidget(self.soc_circular_meter_widget)
         hbox1.addWidget(self.speed_circular_meter_widget)
@@ -458,21 +571,26 @@ class MainDashboardWindow(QWidget):
         hbox.addLayout(hbox1)
 
         # Add a rectangular meter for temperature
-        self.cabin_temp = TempMeterContainer("Cabin Temp")
+        self.cabin_temp = TempMeterContainer("Cabin Temp", cabin_temp_threshold_colors)
         self.cabin_temp.setMaximumWidth(150)
 
-        self.trunk_temp = TempMeterContainer("Trunk Temp")
+        self.trunk_temp = TempMeterContainer("Trunk Temp", trunk_temp_threshold_colors)
         self.trunk_temp.setMaximumWidth(150)
-        
-        self.bps_fault_indicator = BPSFaultIndicatorContainer("BPS Fault")
-        self.bps_fault_indicator.setMaximumWidth(150)
+                
+        # self.bps_fault_indicator = BPSFaultIndicatorContainer("BPS Fault")
+        # self.bps_fault_indicator.setMaximumWidth(150)
         
         hbox2 = QHBoxLayout()
         hbox2.addWidget(self.cabin_temp)
         hbox2.addWidget(self.trunk_temp)
-        hbox2.addWidget(self.bps_fault_indicator)
+        # hbox2.addWidget(self.bps_fault_indicator)
 
         self.layout.addLayout(hbox2)
+        
+        # Add a timer to check if the system doesn't respond in that time, set status to faulty
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.check_timeouts)
+        self.timer.start(self.timeout_amount * 1000)
 
     def handle_can_message(self, msg):
         # Extract ID
@@ -526,6 +644,62 @@ class MainDashboardWindow(QWidget):
             
             self.soc_circular_meter_widget.update_value(percentage)
             self.soc_circular_meter_widget.update_label(val)
+            
+        # Update subsystem statuses
+        self.is_timeout = False
+        
+        # Add id to system calls
+        # It will be used to determine if the system is responding or not
+        self.system_calls[id] = time.time()
+        
+        self.subsystem_statuses.update_statuses(msg)
+        
+        # Restart the timer on every update
+        self.timer.start(self.timeout_amount * 1000)
+        
+        print("Restarting timer...")
+        
+    def check_timeouts(self):
+        self.is_timeout = True
+        
+        self.subsystem_statuses.update_statuses(None)
+    
+    # Utility function to check if a system is responding
+    def is_bms_responding(self, msg):        
+        if self.is_timeout:
+            return False
+        
+        # If it's not yet timeout, check if the last message was received within the timeout amount
+        if 0x100 in self.system_calls:
+            last_call = self.system_calls[0x100]
+            if time.time() - last_call < self.timeout_amount:
+                return True
+            
+        return False
+    
+    def is_telemetry_responding(self, msg):
+        if self.is_timeout:
+            return False
+
+        # If it's not yet timeout, check if the last message was received within the timeout amount
+        if 0x10D in self.system_calls:
+            last_call = self.system_calls[0x10D]
+            if time.time() - last_call < self.timeout_amount:
+                return True
+
+        return False
+    
+    def is_arduino_responding(self, msg):
+        if self.is_timeout:
+            return False
+
+        # If it's not yet timeout, check if the last message was received within the timeout amount
+        if 0x10C in self.system_calls:
+            last_call = self.system_calls[0x10C]
+            if time.time() - last_call < self.timeout_amount:
+                return True
+
+        return False
 
 class CANLoggerWindow(QWidget):
     def __init__(self, width=800, height=600):

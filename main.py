@@ -458,14 +458,14 @@ class SOCCircularMeter(QWidget):
         painter.drawText(text_rect, f"{self.value:.1f}%")
 
 class SubSystemStatusWidget(QWidget):
-    def __init__(self, label, process_status_func):
+    def __init__(self, label, process_status_func, init_status=False):
         super().__init__()
         self.setWindowTitle("Subsystem Status")
         self.setFixedSize(200, 40)
         self.process_status_func = process_status_func
         self.label = label
-        self.status = False # Initial status is faulty
-    
+        self.status = init_status
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -495,8 +495,8 @@ class SubSystemStatusesContainer(QWidget):
         self.setFixedSize(600, 40)
 
         layout = QHBoxLayout()
-        for label, process_status_func in subsystems:
-            widget = SubSystemStatusWidget(label, process_status_func)
+        for label, process_status_func, init_status in subsystems:
+            widget = SubSystemStatusWidget(label, process_status_func, init_status)
             layout.addWidget(widget)
 
         self.setLayout(layout)
@@ -521,10 +521,10 @@ class MainDashboardWindow(QWidget):
 
         # Add subsystem statuses container
         subsystems = [
-            ("BMS", lambda msg, self=self: self.is_bms_responding(msg)),
-            ("Telemetry", lambda msg, self=self: self.is_telemetry_responding(msg)),
-            ("Arduino", lambda msg, self=self: self.is_arduino_responding(msg)),
-            ("BFS Fault", lambda msg, self=self: False),
+            ("BMS", lambda msg, self=self: self.is_bms_responding(msg), False),
+            ("Telemetry", lambda msg, self=self: self.is_telemetry_responding(msg), False),
+            ("Arduino", lambda msg, self=self: self.is_arduino_responding(msg), False),
+            ("BFS Fault", lambda msg, self=self: self.is_bps_faulty(msg), True),
         ]
         self.subsystem_statuses = SubSystemStatusesContainer(subsystems)
         self.layout.addWidget(self.subsystem_statuses)
@@ -700,6 +700,19 @@ class MainDashboardWindow(QWidget):
                 return True
 
         return False
+    
+    def is_bps_faulty(self, msg):
+        if self.is_timeout:
+            return False
+        
+        # BPS Faulty is only called when telemetry sends a message with ID 0x10F
+        # Extract the first byte of the message data
+        if msg is None or len(msg.data) == 0 or msg.id != 0x10F:
+            return False  # If the message is None or doesn't have data, return False
+        
+        bps_faulty = msg.data[0]  # First byte indicates BPS fault status
+
+        return False if bps_faulty == 1 else True  # 1 means faulty, 0 means not faulty
 
 class CANLoggerWindow(QWidget):
     def __init__(self, width=800, height=600):
